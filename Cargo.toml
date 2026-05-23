@@ -1,6 +1,6 @@
 [package]
 name = "animus-subject-default"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Elastic-2.0"
 description = "Default task subject backend for Animus — same data layout as built-in, covers full TaskProvider surface"
@@ -18,9 +18,9 @@ name = "animus-subject-default"
 path = "src/main.rs"
 
 [dependencies]
-animus-plugin-protocol  = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.7" }
-animus-subject-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.7" }
-animus-plugin-runtime   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.7" }
+animus-plugin-protocol  = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
+animus-subject-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
+animus-plugin-runtime   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "io-std"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
