@@ -18,9 +18,9 @@ name = "animus-subject-default"
 path = "src/main.rs"
 
 [dependencies]
-animus-plugin-protocol  = { git = "https://github.com/launchapp-dev/animus-protocol", branch = "main" }
-animus-subject-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", branch = "main" }
-animus-plugin-runtime   = { git = "https://github.com/launchapp-dev/animus-protocol", branch = "main" }
+animus-plugin-protocol  = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.7" }
+animus-subject-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.7" }
+animus-plugin-runtime   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.7" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "io-std"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
