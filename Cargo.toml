@@ -1,0 +1,40 @@
+[package]
+name = "animus-subject-default"
+version = "0.1.0"
+edition = "2021"
+license = "Elastic-2.0"
+description = "Default task subject backend for Animus — same data layout as built-in, covers full TaskProvider surface"
+repository = "https://github.com/launchapp-dev/animus-subject-default"
+homepage = "https://github.com/launchapp-dev/animus-cli"
+readme = "README.md"
+default-run = "animus-subject-default"
+
+[lib]
+name = "animus_subject_default"
+path = "src/lib.rs"
+
+[[bin]]
+name = "animus-subject-default"
+path = "src/main.rs"
+
+[dependencies]
+animus-plugin-protocol  = { git = "https://github.com/launchapp-dev/animus-protocol", branch = "main" }
+animus-subject-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", branch = "main" }
+animus-plugin-runtime   = { git = "https://github.com/launchapp-dev/animus-protocol", branch = "main" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "io-std"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+parking_lot = "0.12"
+futures-core = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

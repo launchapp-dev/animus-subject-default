@@ -1,0 +1,50 @@
+schema = "animus.plugin.v1"
+name = "animus-subject-default"
+version = "0.1.0"
+plugin_kind = "subject_backend"
+description = "Default task subject backend for Animus — covers the full TaskProvider surface so the in-tree InTreeTaskSubjectBackend can be deleted"
+
+[capabilities]
+streaming = true
+progress = false
+cancellation = false
+subject_kinds = ["task"]
+methods = [
+  "task/list",
+  "task/list_filtered",
+  "task/list_prioritized",
+  "task/get",
+  "task/create",
+  "task/update",
+  "task/replace",
+  "task/delete",
+  "task/statistics",
+  "task/assign",
+  "task/status",
+  "task/next",
+  "task/add_checklist_item",
+  "task/update_checklist_item",
+  "task/add_dependency",
+  "task/remove_dependency",
+  "task/watch",
+  "task/schema",
+  "health/check",
+]
+
+[binary]
+default = "animus-subject-default"
+
+[[env]]
+key = "ANIMUS_DEFAULT_TASK_DB_PATH"
+description = "Path to the tasks SQLite database (default: <cwd>/.animus/subjects/tasks.db, the cwd the daemon launches the plugin in is the project root)"
+required = false
+
+[[env]]
+key = "ANIMUS_DEFAULT_TASK_ID_PREFIX"
+description = "Sequential task id prefix (default: TASK-)"
+required = false
+
+[[env]]
+key = "ANIMUS_DEFAULT_TASK_ID_PAD"
+description = "Zero-padding width for sequential ids (default: 3, e.g. TASK-001)"
+required = false
