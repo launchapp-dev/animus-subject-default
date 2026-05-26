@@ -1,15 +1,22 @@
-name: Release
+name: release
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags:
+      - "v*"
 
 permissions:
   contents: write
+  id-token: write
+
+env:
+  # GitHub Actions runner Node 20 -> Node 24 deprecation (effective 2026-06-02).
+  # Forces JS-based actions onto Node 24 ahead of the cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
-    name: Build (${{ matrix.target }})
+    name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -17,37 +24,51 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
+            archive: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
+            archive: tar.gz
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }}
-      - name: Package
+      - name: install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+      - name: build (native)
+        if: '!matrix.cross'
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: package
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/animus-subject-default dist/animus-subject-default-${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: animus-subject-default-${{ matrix.target }}
-          path: dist/animus-subject-default-${{ matrix.target }}
-
-  release:
-    name: GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+          BIN=animus-subject-default
+          ARCHIVE="${BIN}-${{ matrix.target }}.tar.gz"
+          tar -C target/${{ matrix.target }}/release -czf "dist/${ARCHIVE}" "${BIN}"
+          ( cd dist && shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256" )
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+      - name: Sign archive with cosign (keyless)
+        run: |
+          set -euo pipefail
+          BIN=animus-subject-default
+          ARCHIVE="${BIN}-${{ matrix.target }}.tar.gz"
+          cd dist
+          cosign sign-blob \
+            --yes \
+            --bundle "${ARCHIVE}.bundle" \
+            "${ARCHIVE}"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
