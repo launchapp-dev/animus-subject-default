@@ -17,8 +17,8 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 
 use animus_plugin_protocol::{
-    error_codes, InitializeResult, PluginCapabilities, PluginInfo, PluginManifest, RpcError,
-    RpcRequest, RpcResponse, PLUGIN_KIND_SUBJECT_BACKEND, PROTOCOL_VERSION,
+    error_codes, InitializeResult, PluginCapabilities, PluginInfo, RpcError, RpcRequest,
+    RpcResponse, PLUGIN_KIND_SUBJECT_BACKEND, PROTOCOL_VERSION,
 };
 use animus_subject_default::backend::DefaultTaskBackend;
 use animus_subject_default::config::DefaultTaskConfig;
@@ -263,6 +263,7 @@ fn capabilities() -> PluginCapabilities {
             "task/schema".into(),
             "task/watch".into(),
             "health/check".into(),
+            SUBJECT_KIND_TASK_CAPABILITY.into(),
         ],
         streaming: true,
         progress: false,
@@ -271,6 +272,14 @@ fn capabilities() -> PluginCapabilities {
         mcp_tools: Vec::new(),
     }
 }
+
+/// Capability marker advertised so the daemon's plugin preflight at
+/// `crates/orchestrator-core/src/plugin_preflight/mod.rs` recognizes this
+/// plugin as covering the `kind=task` subject role. The preflight derives
+/// subject_kinds by scanning the plugin's `capabilities` for entries
+/// prefixed `subject_kind:`. Mirrors the `$ui/web` pattern used by
+/// `launchapp-dev/animus-web-ui` to advertise extra capability markers.
+const SUBJECT_KIND_TASK_CAPABILITY: &str = "subject_kind:task";
 
 fn initialize_response(
     id: Option<Value>,
@@ -324,14 +333,35 @@ fn parse_manifest_flag() -> bool {
 }
 
 fn print_manifest_and_exit(info: &PluginInfo, capabilities: &PluginCapabilities) -> ! {
-    let manifest = PluginManifest {
-        name: info.name.clone(),
-        version: info.version.clone(),
-        plugin_kind: info.plugin_kind.clone(),
-        description: info.description.clone().unwrap_or_default(),
-        protocol_version: PROTOCOL_VERSION.to_string(),
-        capabilities: capabilities.methods.clone(),
-    };
+    let mut advertised = capabilities.methods.clone();
+    if !advertised.iter().any(|m| m == SUBJECT_KIND_TASK_CAPABILITY) {
+        advertised.push(SUBJECT_KIND_TASK_CAPABILITY.to_string());
+    }
+    let manifest = json!({
+        "name": info.name.clone(),
+        "version": info.version.clone(),
+        "plugin_kind": info.plugin_kind.clone(),
+        "description": info.description.clone().unwrap_or_default(),
+        "protocol_version": PROTOCOL_VERSION,
+        "capabilities": advertised,
+        "env_required": [
+            {
+                "name": "ANIMUS_DEFAULT_TASK_DB_PATH",
+                "description": "Path to the tasks SQLite database.",
+                "required": false
+            },
+            {
+                "name": "ANIMUS_DEFAULT_TASK_ID_PREFIX",
+                "description": "Sequential task id prefix.",
+                "required": false
+            },
+            {
+                "name": "ANIMUS_DEFAULT_TASK_ID_PAD",
+                "description": "Zero-padding width for sequential task ids.",
+                "required": false
+            }
+        ]
+    });
     let mut stdout = io::stdout().lock();
     let _ = writeln!(
         stdout,

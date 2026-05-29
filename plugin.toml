@@ -1,6 +1,6 @@
 schema = "animus.plugin.v1"
 name = "animus-subject-default"
-version = "0.1.0"
+version = "0.1.2"
 plugin_kind = "subject_backend"
 description = "Default task subject backend for Animus — covers the full TaskProvider surface so the in-tree InTreeTaskSubjectBackend can be deleted"
 
@@ -29,6 +29,7 @@ methods = [
   "task/watch",
   "task/schema",
   "health/check",
+  "subject_kind:task",
 ]
 
 [binary]
