@@ -1,6 +1,6 @@
 [package]
 name = "animus-subject-default"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "Elastic-2.0"
 description = "Default task subject backend for Animus — same data layout as built-in, covers full TaskProvider surface"

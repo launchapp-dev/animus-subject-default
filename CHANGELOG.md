@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.2 — 2026-05-29
+## v0.1.3 — 2026-05-29
 
 ### Fixed
 
@@ -19,6 +19,12 @@
 - Bumped `animus-protocol` git pin from `v0.1.8` to `v0.1.13` so the runtime,
   protocol, and subject-protocol crates track the same release that introduced
   the `*_main_with_capabilities` extension point.
+
+## v0.1.2
+
+- Tagged but did not actually advertise the `subject_kind:task` capability
+  marker; preflight still reported the role as unsatisfied. Superseded by
+  v0.1.3.
 
 ## v0.1.1
 
