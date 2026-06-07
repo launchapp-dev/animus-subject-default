@@ -112,6 +112,38 @@ async fn handle_request(
         return;
     }
 
+    // `task/delete` and `subject/delete` route through SubjectBackend::delete
+    // so the response shape is the protocol DeleteSubjectResponse `{ok}` and
+    // the watch broadcaster sees a Deleted event. We intercept BEFORE the
+    // legacy task dispatcher so the kind-prefixed verb returns the protocol
+    // shape v0.5.7 hosts expect when SubjectSchema.supports_delete is true.
+    if method == "task/delete" || method == "subject/delete" {
+        let resp = handle_subject_delete(id.clone(), params, backend.clone()).await;
+        write_frame(&stdout, &resp).await;
+        return;
+    }
+    // `subject/list` is the protocol-canonical verb: route through
+    // `SubjectBackend::list` so the v0.5.7 `SubjectFilter` additions
+    // (`native_status`, `dispatch_label`, `has_attachment_kind`) are
+    // honored. `task/list` stays on the legacy `methods::list` path
+    // (intercepted later by `methods::try_dispatch`) because that path
+    // accepts the historical `{"status": "ready"}` shorthand and raw
+    // native-status strings like `"backlog"` / `"completed"` that don't
+    // match the `SubjectFilter` shape.
+    //
+    // TODO(codex-p2): unify task/list and subject/list filter semantics —
+    // either teach `methods::list` to honor the new SubjectFilter
+    // dimensions, or migrate the daemon's `SubjectRouter` to call
+    // `subject/list` exclusively. Carrying two filter dialects on the
+    // same backend is fragile.
+    if method == "subject/list" {
+        let resp = handle_standard_subject(id.clone(), &method, params, backend.clone())
+            .await
+            .unwrap_or_else(|| RpcResponse::ok(None, Value::Null));
+        write_frame(&stdout, &resp).await;
+        return;
+    }
+
     // Try the extended TaskProvider surface first.
     if let Some(dispatch) = methods::try_dispatch(backend.store(), &method, params.clone()).await {
         let resp = match dispatch {
@@ -134,6 +166,33 @@ async fn handle_request(
     }
 }
 
+async fn handle_subject_delete(
+    id: Option<Value>,
+    params: Option<Value>,
+    backend: Arc<DefaultTaskBackend>,
+) -> RpcResponse {
+    let id_str = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let Some(id_str) = id_str else {
+        return RpcResponse::err(
+            id,
+            RpcError {
+                code: error_codes::INVALID_PARAMS,
+                message: "subject/delete requires id".into(),
+                data: None,
+            },
+        );
+    };
+    let subject_id = animus_subject_protocol::SubjectId::new(id_str);
+    match backend.delete(&subject_id).await {
+        Ok(value) => RpcResponse::ok(id, serde_json::to_value(value).unwrap_or(Value::Null)),
+        Err(error) => RpcResponse::err(id, error.into()),
+    }
+}
+
 async fn handle_standard_subject(
     id: Option<Value>,
     method: &str,
@@ -143,7 +202,20 @@ async fn handle_standard_subject(
     let (_kind, verb) = subject_method_parts(method);
     match verb {
         "list" => {
-            let filter = parse_or_default(params).unwrap_or_default();
+            // ao-cli's daemon control wraps the filter in a `{"filter": {...}}`
+            // envelope (see crates/orchestrator-daemon-runtime/src/control/
+            // dispatch.rs `params = json!({"filter": request.filter})`). Other
+            // callers (and the protocol-export schemas) send the filter flat.
+            // Accept both: prefer the unwrapped form when present, otherwise
+            // deserialize the params directly.
+            let filter = match params.as_ref() {
+                Some(value) if value.get("filter").is_some() => value
+                    .get("filter")
+                    .and_then(|f| serde_json::from_value(f.clone()).ok())
+                    .unwrap_or_default(),
+                Some(_) => parse_or_default(params).unwrap_or_default(),
+                None => Default::default(),
+            };
             let res = backend.list(filter).await;
             Some(match res {
                 Ok(value) => {
@@ -212,6 +284,12 @@ async fn handle_standard_subject(
                 serde_json::to_value(schema).unwrap_or(Value::Null),
             ))
         }
+        // `delete` is intercepted earlier in `handle_request` for the
+        // `task` / `subject` prefixes and routed through
+        // `SubjectBackend::delete`. Other prefixes (e.g. `requirement/delete`)
+        // fall through to the `METHOD_NOT_FOUND` arm below because this
+        // plugin only advertises the `task` kind.
+        //
         // watch is intentionally not implemented in this minimal stdio
         // loop; the broadcast stream is exposed via the SubjectBackend
         // trait for embedders that wrap us in a higher-level host.
@@ -262,12 +340,18 @@ fn capabilities() -> PluginCapabilities {
             "task/remove_dependency".into(),
             "task/schema".into(),
             "task/watch".into(),
+            "subject/list".into(),
+            "subject/get".into(),
+            "subject/update".into(),
+            "subject/delete".into(),
+            "subject/schema".into(),
             "health/check".into(),
             SUBJECT_KIND_TASK_CAPABILITY.into(),
         ],
         streaming: true,
         progress: false,
         cancellation: false,
+        projections: Vec::new(),
         subject_kinds: vec!["task".into()],
         mcp_tools: Vec::new(),
     }
@@ -290,6 +374,7 @@ fn initialize_response(
         protocol_version: PROTOCOL_VERSION.to_string(),
         plugin_info: info.clone(),
         capabilities: capabilities.clone(),
+        kind_capabilities: std::collections::HashMap::new(),
     };
     match serde_json::to_value(result) {
         Ok(value) => RpcResponse::ok(id, value),

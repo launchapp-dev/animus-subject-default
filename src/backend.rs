@@ -83,6 +83,20 @@ impl DefaultTaskBackend {
 #[async_trait]
 impl SubjectBackend for DefaultTaskBackend {
     async fn list(&self, filter: SubjectFilter) -> Result<SubjectList, BackendError> {
+        // The default task backend does not declare any
+        // status_dispatch_hints, and never emits subjects with
+        // attachments, so a caller setting dispatch_label or
+        // has_attachment_kind cannot find a matching subject — short-circuit
+        // to an empty result. `native_status` IS emitted by `subject_view`
+        // (it mirrors the task's raw status string), so that filter is
+        // applied per-row in the loop below.
+        if filter.dispatch_label.is_some() || filter.has_attachment_kind.is_some() {
+            return Ok(SubjectList {
+                subjects: Vec::new(),
+                next_cursor: None,
+                fetched_at: Utc::now(),
+            });
+        }
         let raw = self.store.list_all().map_err(BackendError::Other)?;
         let mut subjects = Vec::new();
         for task in raw {
@@ -93,6 +107,11 @@ impl SubjectBackend for DefaultTaskBackend {
             }
             if !filter.kind.is_empty() && !filter.kind.iter().any(|k| k == &subject.kind) {
                 continue;
+            }
+            if let Some(want_native) = filter.native_status.as_deref() {
+                if subject.native_status.as_deref() != Some(want_native) {
+                    continue;
+                }
             }
             if !filter.labels_any.is_empty()
                 && !subject.labels.iter().any(|l| filter.labels_any.contains(l))
@@ -155,6 +174,43 @@ impl SubjectBackend for DefaultTaskBackend {
         Some(Box::pin(stream) as Pin<Box<dyn Stream<Item = SubjectChangedEvent> + Send>>)
     }
 
+    async fn delete(
+        &self,
+        id: &SubjectId,
+    ) -> Result<animus_subject_protocol::DeleteSubjectResponse, BackendError> {
+        let bare = strip_kind_prefix(id.as_str());
+        let removed = self.store.delete(&bare).map_err(BackendError::Other)?;
+        if !removed {
+            return Err(BackendError::NotFound(id.to_string()));
+        }
+        // Best-effort emit Deleted event so any active watch streams see it.
+        // Use the canonical kind-prefixed id so consumers correlating against
+        // list/get results still find the deletion when the caller delete'd
+        // with the bare id form.
+        let canonical_id = SubjectId::new(add_kind_prefix(&bare));
+        let deleted_subject = Subject {
+            id: canonical_id.clone(),
+            kind: SUBJECT_KIND.to_string(),
+            title: String::new(),
+            description: None,
+            status: SubjectStatus::Cancelled,
+            priority: None,
+            assignee: None,
+            labels: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+            url: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            custom: Default::default(),
+            native_status: None,
+            status_metadata: serde_json::Value::Null,
+            attachments: Vec::new(),
+        };
+        self.broadcast(ChangeKind::Deleted, deleted_subject);
+        Ok(animus_subject_protocol::DeleteSubjectResponse { ok: true })
+    }
+
     fn schema(&self) -> SubjectSchema {
         SubjectSchema {
             kinds: vec![SUBJECT_KIND.to_string()],
@@ -167,6 +223,7 @@ impl SubjectBackend for DefaultTaskBackend {
             ],
             supports_watch: true,
             supports_create: true,
+            supports_delete: true,
             supports_pagination: false,
             native_status_values: vec![
                 "backlog".into(),
@@ -308,8 +365,9 @@ fn subject_patch_to_value(patch: &SubjectPatch) -> Value {
         );
     }
     // Daemon also addresses the wire id with `task:` prefix; the dispatcher
-    // strips it when needed, so no transform here.
-    let _ = add_kind_prefix; // keep import live across feature flag flips.
+    // strips it when needed, so no transform here. `add_kind_prefix` is
+    // used by the `delete` SubjectBackend impl above to emit canonical ids
+    // on the watch broadcast.
     Value::Object(out)
 }
 
