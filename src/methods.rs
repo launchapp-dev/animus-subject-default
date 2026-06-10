@@ -459,12 +459,13 @@ fn add_dependency(store: &Store, params: Option<Value>) -> Result<Value, RpcErro
         let arr = deps
             .as_array_mut()
             .ok_or_else(|| internal("dependencies field is not an array"))?;
-        let already = arr.iter().any(|d| {
-            d.get("dependency_id").and_then(Value::as_str) == Some(dependency_id.as_str())
-        });
+        let bare = strip_kind_prefix(&dependency_id);
+        let already = arr
+            .iter()
+            .any(|d| d.get("dependency_id").and_then(Value::as_str) == Some(bare.as_str()));
         if !already {
             arr.push(json!({
-                "dependency_id": strip_kind_prefix(&dependency_id),
+                "dependency_id": bare,
                 "dependency_type": dependency_type,
                 "added_at": now,
             }));
@@ -630,6 +631,44 @@ pub fn apply_patch(task: &mut Value, patch: &Value) {
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect::<Vec<_>>()),
             );
+        }
+    }
+    let labels_add: Vec<String> = patch
+        .get("labels_add")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let labels_remove: Vec<String> = patch
+        .get("labels_remove")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !labels_add.is_empty() || !labels_remove.is_empty() {
+        if let Some(obj) = task.as_object_mut() {
+            let mut tags: Vec<String> = obj
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            tags.retain(|t| !labels_remove.contains(t));
+            for label in labels_add {
+                if !tags.contains(&label) {
+                    tags.push(label);
+                }
+            }
+            obj.insert("tags".into(), json!(tags));
         }
     }
     if let Some(title) = patch.get("title").and_then(Value::as_str) {
