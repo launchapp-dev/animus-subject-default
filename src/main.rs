@@ -13,6 +13,7 @@
 //! and falls back to the standard SubjectBackend handler (`subject_view`
 //! semantics) for everything else.
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 
@@ -23,10 +24,20 @@ use animus_plugin_protocol::{
 use animus_subject_default::backend::DefaultTaskBackend;
 use animus_subject_default::config::DefaultTaskConfig;
 use animus_subject_default::methods;
-use animus_subject_protocol::SubjectBackend;
+use animus_subject_protocol::{
+    SubjectBackend, METHOD_SUBJECT_UNWATCH, METHOD_SUBJECT_WATCH, NOTIFICATION_SUBJECT_CHANGED,
+};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+/// Per-watch task registry: maps a `subject/watch` request id (stringified
+/// JSON-RPC id) to the spawned task draining `backend.watch()` into
+/// `subject/changed` notifications. `subject/unwatch { watch_id }` aborts and
+/// removes the matching task so the backend's watch subscription is dropped
+/// instead of leaking until the plugin process exits.
+type WatchRegistry = Arc<Mutex<HashMap<String, JoinHandle<()>>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -52,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let config = DefaultTaskConfig::from_env()?;
     let backend = Arc::new(DefaultTaskBackend::from_config(&config)?);
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+    let watches: WatchRegistry = Arc::new(Mutex::new(HashMap::new()));
     let mut reader = BufReader::new(tokio::io::stdin());
 
     loop {
@@ -73,8 +85,9 @@ async fn main() -> anyhow::Result<()> {
         let capabilities = capabilities.clone();
         let backend = backend.clone();
         let stdout = stdout.clone();
+        let watches = watches.clone();
         tokio::spawn(async move {
-            handle_request(request, info, capabilities, backend, stdout).await;
+            handle_request(request, info, capabilities, backend, stdout, watches).await;
         });
     }
 
@@ -87,6 +100,7 @@ async fn handle_request(
     capabilities: PluginCapabilities,
     backend: Arc<DefaultTaskBackend>,
     stdout: Arc<Mutex<Stdout>>,
+    watches: WatchRegistry,
 ) {
     let id = request.id.clone();
     let method = request.method.clone();
@@ -119,6 +133,27 @@ async fn handle_request(
     // shape v0.5.7 hosts expect when SubjectSchema.supports_delete is true.
     if method == "task/delete" || method == "subject/delete" {
         let resp = handle_subject_delete(id.clone(), params, backend.clone()).await;
+        write_frame(&stdout, &resp).await;
+        return;
+    }
+
+    // `subject/watch` (and the kind-prefixed `task/watch`): ack the request,
+    // then spawn a task that drains `backend.watch()` into `subject/changed`
+    // notifications, echoing the watch request id so the daemon can correlate
+    // events to this subscription. The spawned task is tracked in `watches`
+    // keyed by the stringified request id so `subject/unwatch` can cancel it.
+    if method == METHOD_SUBJECT_WATCH || method == "task/watch" {
+        let resp = handle_subject_watch(id.clone(), backend.clone(), stdout.clone(), watches).await;
+        write_frame(&stdout, &resp).await;
+        return;
+    }
+
+    // `subject/unwatch` (and `task/unwatch`): abort and drop the watch task
+    // for the given `watch_id` so the backend's broadcast subscription is
+    // released. Best-effort and idempotent — an unknown / already-gone
+    // watch_id is a no-op success.
+    if method == METHOD_SUBJECT_UNWATCH || method == "task/unwatch" {
+        let resp = handle_subject_unwatch(id.clone(), params, watches).await;
         write_frame(&stdout, &resp).await;
         return;
     }
@@ -191,6 +226,88 @@ async fn handle_subject_delete(
         Ok(value) => RpcResponse::ok(id, serde_json::to_value(value).unwrap_or(Value::Null)),
         Err(error) => RpcResponse::err(id, error.into()),
     }
+}
+
+/// Stringify a JSON-RPC id for use as the watch-registry key. The daemon
+/// allocates numeric ids and sends `subject/unwatch { watch_id: "<n>" }`
+/// where the string is the decimal form of that number, so we normalize both
+/// the watch id and the unwatch `watch_id` through the same representation.
+fn watch_key(id: &Option<Value>) -> String {
+    match id {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(other) => other.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+/// Start a `subject/watch` subscription: subscribe to the backend's change
+/// broadcast, then spawn a task that forwards each event as a
+/// `subject/changed` notification carrying `{ id: <watch req id>, event }`.
+/// The task handle is stored in `watches` so `subject/unwatch` can abort it.
+async fn handle_subject_watch(
+    id: Option<Value>,
+    backend: Arc<DefaultTaskBackend>,
+    stdout: Arc<Mutex<Stdout>>,
+    watches: WatchRegistry,
+) -> RpcResponse {
+    use tokio_stream::StreamExt;
+
+    let key = watch_key(&id);
+    let Some(mut stream) = backend.watch().await else {
+        return RpcResponse::err(
+            id,
+            RpcError {
+                code: error_codes::METHOD_NOT_SUPPORTED,
+                message: "this backend does not support subject/watch".into(),
+                data: None,
+            },
+        );
+    };
+
+    let echo_id = id.clone();
+    let task = tokio::spawn(async move {
+        while let Some(event) = stream.next().await {
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": NOTIFICATION_SUBJECT_CHANGED,
+                "params": {
+                    "id": echo_id,
+                    "event": event,
+                },
+            });
+            write_frame(&stdout, &notification).await;
+        }
+    });
+
+    // Replace any prior task under the same key (a re-issued watch with the
+    // same id), aborting the stale one so it cannot leak.
+    if let Some(previous) = watches.lock().await.insert(key, task) {
+        previous.abort();
+    }
+
+    RpcResponse::ok(id, json!({}))
+}
+
+/// Cancel a `subject/watch` subscription. Aborts and removes the registered
+/// task for `params.watch_id`. Unknown ids are a no-op success so the daemon's
+/// best-effort, fire-and-forget unwatch never errors on a stale subscription.
+async fn handle_subject_unwatch(
+    id: Option<Value>,
+    params: Option<Value>,
+    watches: WatchRegistry,
+) -> RpcResponse {
+    let watch_id = params
+        .as_ref()
+        .and_then(|p| p.get("watch_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(watch_id) = watch_id {
+        if let Some(task) = watches.lock().await.remove(&watch_id) {
+            task.abort();
+        }
+    }
+    RpcResponse::ok(id, json!({ "ok": true }))
 }
 
 async fn handle_standard_subject(
@@ -340,11 +457,14 @@ fn capabilities() -> PluginCapabilities {
             "task/remove_dependency".into(),
             "task/schema".into(),
             "task/watch".into(),
+            "task/unwatch".into(),
             "subject/list".into(),
             "subject/get".into(),
             "subject/update".into(),
             "subject/delete".into(),
             "subject/schema".into(),
+            "subject/watch".into(),
+            "subject/unwatch".into(),
             "health/check".into(),
             SUBJECT_KIND_TASK_CAPABILITY.into(),
         ],
